@@ -95,6 +95,8 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=30)
+    image_base64: str | None = Field(default=None, max_length=5_600_000)
+    image_mime_type: Literal["image/jpeg", "image/png", "image/webp"] | None = None
 
 
 class ChatResponse(BaseModel):
@@ -362,19 +364,67 @@ def chat(
     system_prompt = SYSTEM_PROMPT
     if memory:
         system_prompt += (
-            "\\n\\nДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:\\n"
+            "\n\nДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:\n"
             "Это краткие заметки из предыдущих разговоров. Используй их "
-            "только если они уместны; не повторяй их без необходимости.\\n"
+            "только если они уместны; не повторяй их без необходимости.\n"
             f"{memory}"
         )
 
     input_messages = [
         {"role": "system", "content": system_prompt}
     ]
-    input_messages.extend(
-        {"role": item.role, "content": item.content}
-        for item in request.messages
-    )
+    if (request.image_base64 is None) != (request.image_mime_type is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Image data and MIME type must be provided together.",
+        )
+
+    image_data_url = None
+    if request.image_base64 is not None:
+        try:
+            image_bytes = base64.b64decode(request.image_base64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid Base64 image data.")
+
+        if not image_bytes or len(image_bytes) > 4 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Image must be smaller than 4 MB.")
+
+        mime = request.image_mime_type
+        valid_signature = (
+            (mime == "image/jpeg" and image_bytes.startswith(b"\xff\xd8\xff"))
+            or (mime == "image/png" and image_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+            or (
+                mime == "image/webp"
+                and len(image_bytes) >= 12
+                and image_bytes.startswith(b"RIFF")
+                and image_bytes[8:12] == b"WEBP"
+            )
+        )
+        if not valid_signature:
+            raise HTTPException(
+                status_code=400,
+                detail="Image content does not match the declared image type.",
+            )
+
+        if request.messages[-1].role != "user":
+            raise HTTPException(
+                status_code=400,
+                detail="An image must accompany the latest user message.",
+            )
+
+        image_data_url = f"data:{mime};base64,{request.image_base64}"
+
+    for index, item in enumerate(request.messages):
+        if image_data_url is not None and index == len(request.messages) - 1:
+            input_messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": item.content},
+                    {"type": "input_image", "image_url": image_data_url},
+                ],
+            })
+        else:
+            input_messages.append({"role": item.role, "content": item.content})
 
     try:
         result = client.responses.create(

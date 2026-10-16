@@ -6,3 +6,13 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Local secrets — never commit
+local_secrets/
+*service-account*.json
+*firebase-adminsdk*.json
+
+# Temporary local tests and merge candidates
+test_image_local_temp.py
+main_merged_candidate.py
+emily_server_image_fixed.py
