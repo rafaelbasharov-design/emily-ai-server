@@ -2,6 +2,8 @@ import os
 import json
 import base64
 import logging
+import urllib.request
+import urllib.error
 from typing import Literal
 
 import firebase_admin
@@ -95,10 +97,13 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=30)
+    image_base64: str | None = Field(default=None, max_length=17_000_000)
+    image_mime_type: str | None = Field(default=None, max_length=100)
 
 
 class ChatResponse(BaseModel):
     reply: str
+    image_url: str | None = None
 
 
 def initialize_firebase():
@@ -146,6 +151,80 @@ def verify_firebase_user(authorization: str | None) -> str:
             status_code=401,
             detail="Invalid or expired Firebase authentication token.",
         )
+
+
+def upload_imagekit_image(image_base64: str, mime_type: str | None) -> str:
+    """Upload an image to ImageKit using server-only credentials and return its URL."""
+    public_key = os.getenv("IMAGEKIT_PUBLIC_KEY")
+    private_key = os.getenv("IMAGEKIT_PRIVATE_KEY")
+    url_endpoint = os.getenv("IMAGEKIT_URL_ENDPOINT", "").rstrip("/")
+
+    if not public_key or not private_key or not url_endpoint:
+        raise HTTPException(
+            status_code=503,
+            detail="ImageKit is not configured on the server.",
+        )
+
+    if mime_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported image type. Use JPEG, PNG, WEBP, or GIF.",
+        )
+
+    try:
+        image_bytes = base64.b64decode(image_base64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 image data.")
+
+    if not image_bytes or len(image_bytes) > 12 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail="Image must be smaller than or equal to 12 MB.",
+        )
+
+    boundary = "----EmilyImageKitUploadBoundary"
+    file_name = "emily_" + __import__("uuid").uuid4().hex + {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }[mime_type]
+    parts = [
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\nContent-Type: {mime_type}\r\n\r\n".encode("utf-8"),
+        image_bytes,
+        b"\r\n",
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"fileName\"\r\n\r\n{file_name}\r\n".encode("utf-8"),
+        f"--{boundary}--\r\n".encode("utf-8"),
+    ]
+    body = b"".join(parts)
+    credentials_value = base64.b64encode(f"{private_key}:".encode("utf-8")).decode("ascii")
+    req = urllib.request.Request(
+        "https://upload.imagekit.io/api/v1/files/upload",
+        data=body,
+        headers={
+            "Authorization": f"Basic {credentials_value}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        image_url = result.get("url")
+        if not isinstance(image_url, str) or not image_url.startswith("https://"):
+            raise RuntimeError("ImageKit response did not contain a valid HTTPS URL.")
+        return image_url
+    except urllib.error.HTTPError as exc:
+        logging.error("ImageKit upload failed with HTTP status %s", exc.code)
+        raise HTTPException(
+            status_code=502,
+            detail="Image upload failed. Check ImageKit configuration and server logs.",
+        )
+    except urllib.error.URLError:
+        logging.exception("Could not connect to ImageKit")
+        raise HTTPException(status_code=502, detail="Could not connect to image storage.")
 
 
 def memory_document(user_id: str):
@@ -368,13 +447,25 @@ def chat(
             f"{memory}"
         )
 
-    input_messages = [
-        {"role": "system", "content": system_prompt}
-    ]
-    input_messages.extend(
-        {"role": item.role, "content": item.content}
-        for item in request.messages
-    )
+    uploaded_image_url = None
+    if request.image_base64:
+        uploaded_image_url = upload_imagekit_image(
+            request.image_base64,
+            request.image_mime_type,
+        )
+
+    input_messages = [{"role": "system", "content": system_prompt}]
+    for index, item in enumerate(request.messages):
+        if uploaded_image_url and index == len(request.messages) - 1 and item.role == "user":
+            input_messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": item.content},
+                    {"type": "input_image", "image_url": uploaded_image_url},
+                ],
+            })
+        else:
+            input_messages.append({"role": item.role, "content": item.content})
 
     try:
         result = client.responses.create(
@@ -402,7 +493,7 @@ def chat(
                 pending_messages=pending_messages,
             )
 
-        return ChatResponse(reply=reply)
+        return ChatResponse(reply=reply, image_url=uploaded_image_url)
 
     except HTTPException:
         raise
