@@ -8,7 +8,7 @@ from typing import Literal
 
 import firebase_admin
 from firebase_admin import auth, credentials, firestore
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -418,6 +418,88 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/transcribe")
+def transcribe(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+):
+    verify_firebase_user(authorization)
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI API is not configured.",
+        )
+
+    allowed_types = {
+        "audio/mp4",
+        "audio/m4a",
+        "audio/x-m4a",
+        "audio/mpeg",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/webm",
+        "audio/ogg",
+    }
+
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported audio format.",
+        )
+
+    try:
+        audio_bytes = file.file.read(25 * 1024 * 1024 + 1)
+
+        if not audio_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail="Audio file is empty.",
+            )
+
+        if len(audio_bytes) > 25 * 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail="Audio file must be 25 MB or smaller.",
+            )
+
+        filename = os.path.basename(file.filename or "recording.m4a")
+
+        if not filename.lower().endswith(
+            (".m4a", ".mp3", ".wav", ".webm", ".ogg", ".mp4")
+        ):
+            filename = "recording.m4a"
+
+        import io
+
+        client = OpenAI(api_key=api_key)
+        result = client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",
+            file=(filename, io.BytesIO(audio_bytes), file.content_type),
+        )
+
+        recognized_text = result.text.strip()
+        if not recognized_text:
+            raise HTTPException(
+                status_code=422,
+                detail="No speech was recognized.",
+            )
+
+        return {"text": recognized_text}
+
+    except HTTPException:
+        raise
+    except Exception:
+        logging.exception("Emily audio transcription failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Audio transcription failed. Check server logs.",
+        )
+    finally:
+        file.file.close()
 
 
 @app.post("/chat", response_model=ChatResponse)
