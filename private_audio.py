@@ -129,8 +129,17 @@ def upload_private_audio(
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             result = json.loads(response.read().decode("utf-8"))
-    except HTTPException:
-        raise
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read(2000).decode("utf-8", errors="replace")
+        logging.error(
+            "ImageKit upload HTTP error: status=%s response=%s",
+            exc.code,
+            error_body,
+        )
+        raise HTTPException(status_code=502, detail="Audio upload failed.")
+    except urllib.error.URLError as exc:
+        logging.error("ImageKit upload connection error: %s", exc.reason)
+        raise HTTPException(status_code=502, detail="Audio upload failed.")
     except Exception:
         logging.exception("Private audio upload failed")
         raise HTTPException(status_code=502, detail="Audio upload failed.")
