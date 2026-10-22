@@ -16,6 +16,9 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(title="Emily AI Server", version="0.3.0-memory-candidate")
 
+from private_audio import router as private_audio_router
+app.include_router(private_audio_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
