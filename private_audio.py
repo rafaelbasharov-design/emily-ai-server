@@ -110,6 +110,7 @@ def upload_private_audio(
         field("fileName", filename),
         field("folder", "/emily_private_audio"),
         field("isPrivateFile", "true"),
+        field("responseFields[]", "isPrivateFile"),
         field("useUniqueFileName", "true"),
         f"--{boundary}--\r\n".encode(),
     ])
