@@ -110,7 +110,7 @@ def upload_private_audio(
         field("fileName", filename),
         field("folder", "/emily_private_audio"),
         field("isPrivateFile", "true"),
-        field("responseFields[]", "isPrivateFile"),
+        field("responseFields", '["isPrivateFile"]'),
         field("useUniqueFileName", "true"),
         f"--{boundary}--\r\n".encode(),
     ])
@@ -167,7 +167,7 @@ def upload_private_audio(
         type(result.get("isPrivateFile")).__name__,
         sorted(result.keys()),
     )
-    
+
     if result.get("isPrivateFile") is not True:
         raise HTTPException(status_code=502, detail="Audio was not marked private.")
 
