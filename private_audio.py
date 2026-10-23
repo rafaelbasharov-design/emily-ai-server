@@ -161,6 +161,13 @@ def upload_private_audio(
     ):
         raise HTTPException(status_code=502, detail="Invalid private audio file path.")
 
+    logging.warning(
+        "ImageKit privacy diagnostic: isPrivateFile=%r, type=%s, keys=%s",
+        result.get("isPrivateFile"),
+        type(result.get("isPrivateFile")).__name__,
+        sorted(result.keys()),
+    )
+    
     if result.get("isPrivateFile") is not True:
         raise HTTPException(status_code=502, detail="Audio was not marked private.")
 
