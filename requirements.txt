@@ -5,3 +5,4 @@ firebase-admin>=6.5,<8.0
 python-multipart>=0.0.20,<1.0
 imagekitio>=4.2,<5.0
 supabase>=2.15,<3.0
+pydub
