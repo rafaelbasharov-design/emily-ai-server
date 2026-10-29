@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import uuid
 from urllib.parse import urlparse
 
@@ -188,7 +189,12 @@ def get_private_audio_url(
     message_id: str = Form(...),
     authorization: str | None = Header(default=None),
 ):
+    auth_watch = time.perf_counter()
     uid = verified_uid(authorization)
+    logging.info(
+        "AUDIO URL TIMING: firebase_auth=%.0fms",
+        (time.perf_counter() - auth_watch) * 1000,
+    )
 
     if not message_id or len(message_id) > 150:
         raise HTTPException(status_code=400, detail="Invalid message ID.")
