@@ -660,7 +660,21 @@ def chat(
             )
             reply = result.output_text.strip()
 
+         # Normalize model output: extract message from JSON responses.
+        reply = reply.strip()
 
+        try:
+            parsed_reply = json.loads(reply)
+            if isinstance(parsed_reply, dict):
+                message_text = parsed_reply.get("message")
+                if isinstance(message_text, str):
+                    reply = message_text.strip()
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Remove audio model separator artifacts.
+        reply = reply.replace("<lim_sep>", "").strip()
+        
         if not reply:
             raise HTTPException(
                 status_code=502,
