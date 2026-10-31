@@ -5,6 +5,10 @@ import logging
 import urllib.request
 import urllib.error
 from typing import Literal
+import imageio_ffmpeg
+from pydub import AudioSegment
+
+AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 
 import firebase_admin
 from firebase_admin import auth, credentials, firestore
@@ -13,11 +17,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
+def convert_audio_to_wav(audio_bytes: bytes) -> bytes:
+    """Convert uploaded audio to WAV for OpenAI audio input."""
+    import io
+
+    source = io.BytesIO(audio_bytes)
+    output = io.BytesIO()
+
+    audio = AudioSegment.from_file(source, format="m4a")
+    audio.export(output, format="wav")
+
+    return output.getvalue()
+
 
 app = FastAPI(title="Emily AI Server", version="0.3.0-memory-candidate")
-
-from private_audio import router as private_audio_router
-app.include_router(private_audio_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -102,6 +115,10 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=30)
     image_base64: str | None = Field(default=None, max_length=17_000_000)
     image_mime_type: str | None = Field(default=None, max_length=100)
+    audio_base64: str | None = Field(default=None, max_length=34_000_000)
+    # Flutter uploads the original recorder file as M4A; the server converts it to WAV.
+    audio_format: Literal["m4a"] | None = None
+
 
 
 class ChatResponse(BaseModel):
@@ -135,6 +152,9 @@ def initialize_firebase():
 
 initialize_firebase()
 db = firestore.client()
+
+from private_audio import router as private_audio_router
+app.include_router(private_audio_router)
 
 
 def verify_firebase_user(authorization: str | None) -> str:
@@ -456,6 +476,14 @@ def transcribe(
 
     try:
         audio_bytes = file.file.read(25 * 1024 * 1024 + 1)
+        logging.info(
+            "Emily audio diagnostics: filename=%r content_type=%r "
+            "size=%d signature=%s",
+            file.filename,
+            file.content_type,
+            len(audio_bytes),
+            audio_bytes[:16].hex(),
+        )
 
         if not audio_bytes:
             raise HTTPException(
@@ -522,13 +550,15 @@ def chat(
     model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     client = OpenAI(api_key=api_key)
 
+
     memory, pending_messages = load_and_track_memory(user_id, request.messages)
     system_prompt = SYSTEM_PROMPT
+
     if memory:
         system_prompt += (
-            "\\n\\nДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:\\n"
+            "\n\nДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:\n"
             "Это краткие заметки из предыдущих разговоров. Используй их "
-            "только если они уместны; не повторяй их без необходимости.\\n"
+            "только если они уместны; не повторяй их без необходимости.\n"
             f"{memory}"
         )
 
@@ -553,12 +583,83 @@ def chat(
             input_messages.append({"role": item.role, "content": item.content})
 
     try:
-        result = client.responses.create(
-            model=model,
-            input=input_messages,
-            max_output_tokens=500,
-        )
-        reply = result.output_text.strip()
+
+        if request.audio_base64:
+            import base64
+
+            if request.image_base64:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Send audio and image in separate messages.",
+                )
+
+            if request.audio_format != "m4a":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Unsupported audio format. Expected m4a input.",
+                )
+
+            audio_bytes = base64.b64decode(
+                request.audio_base64,
+                validate=True,
+            )
+            if not audio_bytes:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Audio file is empty.",
+                )
+
+            wav_bytes = convert_audio_to_wav(audio_bytes)
+            audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
+
+            audio_messages = [
+                {"role": "system", "content": system_prompt}
+            ]
+
+            for index, item in enumerate(request.messages):
+                if index == len(request.messages) - 1 and item.role == "user":
+                    audio_messages.append({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Respond naturally to the user's spoken message. "
+                                    "Use the audio as the primary source of meaning. "
+                                    "Reply in the same language as the user."
+                                ),
+                            },
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": audio_b64,
+                                    "format": "wav",
+                                },
+                            },
+                        ],
+                    })
+                else:
+                    audio_messages.append({
+                        "role": item.role,
+                        "content": item.content,
+                    })
+
+            result = client.chat.completions.create(
+                model="gpt-audio-1.5",
+                messages=audio_messages,
+                modalities=["text"],
+            )
+            reply = (
+                result.choices[0].message.content or ""
+            ).strip()
+        else:
+            result = client.responses.create(
+                model=model,
+                input=input_messages,
+                max_output_tokens=500,
+            )
+            reply = result.output_text.strip()
+
 
         if not reply:
             raise HTTPException(
@@ -583,6 +684,7 @@ def chat(
     except HTTPException:
         raise
     except Exception:
+        logging.exception("Emily chat request failed")
         raise HTTPException(
             status_code=502,
             detail="The AI request failed. Check server logs and API access settings.",
