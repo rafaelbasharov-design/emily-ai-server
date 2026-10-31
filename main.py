@@ -649,6 +649,34 @@ def chat(
                 messages=audio_messages,
                 modalities=["text"],
             )
+            choice = result.choices[0] if result.choices else None
+            message = choice.message if choice else None
+            audio = getattr(message, "audio", None)
+
+            content = getattr(message, "content", None)
+            refusal = getattr(message, "refusal", None)
+            transcript = getattr(audio, "transcript", None)
+
+            logging.info(
+                "Emily audio response diagnostics: "
+                "model=%s choices=%s finish_reason=%s "
+                "content_present=%s content_length=%s "
+                "refusal_present=%s audio_present=%s "
+                "transcript_present=%s transcript_length=%s "
+                "prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+                result.model,
+                len(result.choices),
+                choice.finish_reason if choice else None,
+                bool(content),
+                len(content) if isinstance(content, str) else 0,
+                bool(refusal),
+                audio is not None,
+                bool(transcript),
+                len(transcript) if isinstance(transcript, str) else 0,
+                result.usage.prompt_tokens if result.usage else None,
+                result.usage.completion_tokens if result.usage else None,
+                result.usage.total_tokens if result.usage else None,
+            )
             reply = (
                 result.choices[0].message.content or ""
             ).strip()
@@ -660,21 +688,30 @@ def chat(
             )
             reply = result.output_text.strip()
 
-         # Normalize model output: extract message from JSON responses.
+        # Normalize model output: extract user-facing text from JSON responses.
         reply = reply.strip()
 
         try:
             parsed_reply = json.loads(reply)
+
             if isinstance(parsed_reply, dict):
-                message_text = parsed_reply.get("message")
+                message_text = parsed_reply.get("response")
+
+                if not isinstance(message_text, str):
+                    message_text = parsed_reply.get("message")
+
+                if not isinstance(message_text, str):
+                    message_text = parsed_reply.get("text")
+
                 if isinstance(message_text, str):
                     reply = message_text.strip()
+
         except (json.JSONDecodeError, TypeError):
             pass
 
         # Remove audio model separator artifacts.
         reply = reply.replace("<lim_sep>", "").strip()
-        
+
         if not reply:
             raise HTTPException(
                 status_code=502,
