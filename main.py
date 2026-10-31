@@ -672,6 +672,9 @@ def chat(
                 if not isinstance(message_text, str):
                     message_text = parsed_reply.get("message")
 
+                if not isinstance(message_text, str):
+                    message_text = parsed_reply.get("text")
+
                 if isinstance(message_text, str):
                     reply = message_text.strip()
 
