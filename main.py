@@ -5,7 +5,10 @@ import logging
 import urllib.request
 import urllib.error
 from typing import Literal
+import imageio_ffmpeg
 from pydub import AudioSegment
+
+AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 
 import firebase_admin
 from firebase_admin import auth, credentials, firestore
