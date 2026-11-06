@@ -6,3 +6,6 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Local secrets
+local_secrets/

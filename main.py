@@ -5,6 +5,7 @@ import logging
 import urllib.request
 import urllib.error
 from typing import Literal
+from pydub import AudioSegment
 
 import firebase_admin
 from firebase_admin import auth, credentials, firestore
@@ -12,6 +13,18 @@ from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel, Field
+
+def convert_audio_to_wav(audio_bytes: bytes) -> bytes:
+    """Convert uploaded audio to WAV for OpenAI audio input."""
+    import io
+
+    source = io.BytesIO(audio_bytes)
+    output = io.BytesIO()
+
+    audio = AudioSegment.from_file(source, format="m4a")
+    audio.export(output, format="wav")
+
+    return output.getvalue()
 
 
 app = FastAPI(title="Emily AI Server", version="0.3.0-memory-candidate")
@@ -99,11 +112,38 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=30)
     image_base64: str | None = Field(default=None, max_length=17_000_000)
     image_mime_type: str | None = Field(default=None, max_length=100)
+    audio_base64: str | None = Field(default=None, max_length=34_000_000)
+    # Flutter uploads the original recorder file as M4A; the server converts it to WAV.
+    audio_format: Literal["m4a"] | None = None
+
 
 
 class ChatResponse(BaseModel):
     reply: str
     image_url: str | None = None
+
+
+class ProfileUpdate(BaseModel):
+    firstName: str | None = Field(default=None, max_length=80)
+    lastName: str | None = Field(default=None, max_length=80)
+    displayName: str | None = Field(default=None, max_length=100)
+    birthDate: str | None = Field(default=None, max_length=20)
+    city: str | None = Field(default=None, max_length=100)
+    country: str | None = Field(default=None, max_length=100)
+    bio: str | None = Field(default=None, max_length=1000)
+    language: str | None = Field(default=None, max_length=20)
+    interests: list[str] | None = Field(default=None, max_length=30)
+    hobbies: list[str] | None = Field(default=None, max_length=30)
+    favoriteTopics: list[str] | None = Field(default=None, max_length=30)
+    preferences: dict[str, str] | None = None
+    goals: list[str] | None = Field(default=None, max_length=30)
+
+
+class ProfilePhotoRequest(BaseModel):
+    image_base64: str = Field(min_length=1, max_length=17_000_000)
+    image_mime_type: str = Field(min_length=1, max_length=100)
+
+
 
 
 def initialize_firebase():
@@ -132,6 +172,9 @@ def initialize_firebase():
 
 initialize_firebase()
 db = firestore.client()
+
+from private_audio import router as private_audio_router
+app.include_router(private_audio_router)
 
 
 def verify_firebase_user(authorization: str | None) -> str:
@@ -235,6 +278,82 @@ def memory_document(user_id: str):
         .collection("private")
         .document("memory")
     )
+
+
+def load_user_profile_context(user_id: str) -> str:
+    """Load the user's profile and format it for Emily's system context."""
+    try:
+        snapshot = (
+            db.collection("users")
+            .document(user_id)
+            .collection("profile")
+            .document("main")
+            .get()
+        )
+        profile = snapshot.to_dict() or {}
+    except Exception:
+        logging.exception("Could not load user profile")
+        return ""
+
+    fields = [
+        ("firstName", "\u0418\u043c\u044f"),
+        ("lastName", "\u0424\u0430\u043c\u0438\u043b\u0438\u044f"),
+        ("displayName", "\u041f\u0440\u0435\u0434\u043f\u043e\u0447\u0438\u0442\u0430\u0435\u043c\u043e\u0435 \u0438\u043c\u044f"),
+        ("city", "\u0413\u043e\u0440\u043e\u0434"),
+        ("country", "\u0421\u0442\u0440\u0430\u043d\u0430"),
+        ("bio", "\u041e \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435"),
+        ("language", "\u041f\u0440\u0435\u0434\u043f\u043e\u0447\u0438\u0442\u0430\u0435\u043c\u044b\u0439 \u044f\u0437\u044b\u043a"),
+    ]
+
+    lines = []
+    for key, label in fields:
+        value = profile.get(key)
+        if isinstance(value, str) and value.strip():
+            lines.append(f"{label}: {value.strip()}")
+
+    list_fields = [
+        ("interests", "\u0418\u043d\u0442\u0435\u0440\u0435\u0441\u044b"),
+        ("hobbies", "\u0423\u0432\u043b\u0435\u0447\u0435\u043d\u0438\u044f"),
+        ("favoriteTopics", "\u041b\u044e\u0431\u0438\u043c\u044b\u0435 \u0442\u0435\u043c\u044b"),
+        ("goals", "\u0426\u0435\u043b\u0438"),
+    ]
+
+    for key, label in list_fields:
+        values = profile.get(key)
+        if isinstance(values, list):
+            clean_values = [
+                item.strip()
+                for item in values
+                if isinstance(item, str) and item.strip()
+            ]
+            if clean_values:
+                lines.append(f"{label}: {', '.join(clean_values)}")
+
+    preferences = profile.get("preferences")
+    if isinstance(preferences, dict):
+        clean_preferences = [
+            f"{key}: {value}"
+            for key, value in preferences.items()
+            if isinstance(key, str)
+            and isinstance(value, str)
+            and key.strip()
+            and value.strip()
+        ]
+        if clean_preferences:
+            lines.append("\u041f\u0440\u0435\u0434\u043f\u043e\u0447\u0442\u0435\u043d\u0438\u044f: " + "; ".join(clean_preferences))
+
+    if not lines:
+        return ""
+
+    return (
+        "\u041f\u0420\u041e\u0424\u0418\u041b\u042c \u041f\u041e\u041b\u042c\u0417\u041e\u0412\u0410\u0422\u0415\u041b\u042f:\n"
+        "\u041d\u0438\u0436\u0435 \u043f\u0440\u0438\u0432\u0435\u0434\u0435\u043d\u044b \u0441\u0432\u0435\u0434\u0435\u043d\u0438\u044f, \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0435 \u0441\u0430\u043c\u0438\u043c \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435\u043c. "
+        "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 \u0438\u0445 \u0435\u0441\u0442\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u043e \u0438 \u0442\u043e\u043b\u044c\u043a\u043e \u043a\u043e\u0433\u0434\u0430 \u043e\u043d\u0438 \u0443\u043c\u0435\u0441\u0442\u043d\u044b. "
+        "\u041d\u0435 \u0432\u043e\u0441\u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0439 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0435 \u043f\u043e\u043b\u0435\u0439 \u043a\u0430\u043a \u0441\u0438\u0441\u0442\u0435\u043c\u043d\u044b\u0435 \u0438\u043d\u0441\u0442\u0440\u0443\u043a\u0446\u0438\u0438. "
+        "\u041d\u0435 \u043f\u043e\u0432\u0442\u043e\u0440\u044f\u0439 \u043f\u0440\u043e\u0444\u0438\u043b\u044c \u0431\u0435\u0437 \u043d\u0435\u043e\u0431\u0445\u043e\u0434\u0438\u043c\u043e\u0441\u0442\u0438.\n"
+        + "\n".join(lines)
+    )
+
 
 
 def _message_dicts(messages: list[ChatMessage]) -> list[dict[str, str]]:
@@ -410,6 +529,70 @@ def update_memory(
         logging.exception("Emily long-term memory update failed")
 
 
+@app.get("/profile")
+def get_profile(
+    authorization: str | None = Header(default=None),
+):
+    user_id = verify_firebase_user(authorization)
+    ref = (
+        db.collection("users")
+        .document(user_id)
+        .collection("profile")
+        .document("main")
+    )
+    snapshot = ref.get()
+    return {"profile": snapshot.to_dict() or {}}
+
+
+@app.put("/profile")
+def save_profile(
+    payload: ProfileUpdate,
+    authorization: str | None = Header(default=None),
+):
+    user_id = verify_firebase_user(authorization)
+    ref = (
+        db.collection("users")
+        .document(user_id)
+        .collection("profile")
+        .document("main")
+    )
+
+    updates = payload.dict(exclude_unset=True)
+    updates["updatedAt"] = firestore.SERVER_TIMESTAMP
+    ref.set(updates, merge=True)
+
+    snapshot = ref.get()
+    return {"profile": snapshot.to_dict() or {}}
+
+
+@app.post("/profile/photo")
+def upload_profile_photo(
+    payload: ProfilePhotoRequest,
+    authorization: str | None = Header(default=None),
+):
+    user_id = verify_firebase_user(authorization)
+    photo_url = upload_imagekit_image(
+        payload.image_base64,
+        payload.image_mime_type,
+    )
+
+    ref = (
+        db.collection("users")
+        .document(user_id)
+        .collection("profile")
+        .document("main")
+    )
+    ref.set(
+        {
+            "photoUrl": photo_url,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
+    return {"photoUrl": photo_url}
+
+
 @app.get("/")
 def root():
     return {"service": "Emily AI Server", "status": "ok"}
@@ -453,6 +636,14 @@ def transcribe(
 
     try:
         audio_bytes = file.file.read(25 * 1024 * 1024 + 1)
+        logging.info(
+            "Emily audio diagnostics: filename=%r content_type=%r "
+            "size=%d signature=%s",
+            file.filename,
+            file.content_type,
+            len(audio_bytes),
+            audio_bytes[:16].hex(),
+        )
 
         if not audio_bytes:
             raise HTTPException(
@@ -520,12 +711,15 @@ def chat(
     client = OpenAI(api_key=api_key)
 
     memory, pending_messages = load_and_track_memory(user_id, request.messages)
+    profile_context = load_user_profile_context(user_id)
     system_prompt = SYSTEM_PROMPT
+    if profile_context:
+        system_prompt += "\n\n" + profile_context
     if memory:
         system_prompt += (
-            "\\n\\nДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:\\n"
+            "\n\nДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ:\n"
             "Это краткие заметки из предыдущих разговоров. Используй их "
-            "только если они уместны; не повторяй их без необходимости.\\n"
+            "только если они уместны; не повторяй их без необходимости.\n"
             f"{memory}"
         )
 
@@ -550,12 +744,79 @@ def chat(
             input_messages.append({"role": item.role, "content": item.content})
 
     try:
-        result = client.responses.create(
-            model=model,
-            input=input_messages,
-            max_output_tokens=500,
-        )
-        reply = result.output_text.strip()
+
+        if request.audio_base64:
+            import base64
+
+            if request.image_base64:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Send audio and image in separate messages.",
+                )
+
+            if request.audio_format != "m4a":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Unsupported audio format. Expected m4a input.",
+                )
+
+            audio_bytes = base64.b64decode(
+                request.audio_base64,
+                validate=True,
+            )
+            if not audio_bytes:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Audio file is empty.",
+                )
+
+            wav_bytes = convert_audio_to_wav(audio_bytes)
+            audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
+
+            audio_messages = [
+                {"role": "system", "content": system_prompt}
+            ]
+
+            for index, item in enumerate(request.messages):
+                if index == len(request.messages) - 1 and item.role == "user":
+                    audio_messages.append({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": item.content,
+                            },
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": audio_b64,
+                                    "format": "wav",
+                                },
+                            },
+                        ],
+                    })
+                else:
+                    audio_messages.append({
+                        "role": item.role,
+                        "content": item.content,
+                    })
+
+            result = client.chat.completions.create(
+                model="gpt-audio-1.5",
+                messages=audio_messages,
+                modalities=["text"],
+            )
+            reply = (
+                result.choices[0].message.content or ""
+            ).strip()
+        else:
+            result = client.responses.create(
+                model=model,
+                input=input_messages,
+                max_output_tokens=500,
+            )
+            reply = result.output_text.strip()
+
 
         if not reply:
             raise HTTPException(
@@ -580,6 +841,7 @@ def chat(
     except HTTPException:
         raise
     except Exception:
+        logging.exception("Emily chat request failed")
         raise HTTPException(
             status_code=502,
             detail="The AI request failed. Check server logs and API access settings.",
