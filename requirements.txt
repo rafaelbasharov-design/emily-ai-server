@@ -1,3 +1,4 @@
+
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
 openai>=1.60,<3.0
@@ -5,6 +6,4 @@ firebase-admin>=6.5,<8.0
 python-multipart>=0.0.20,<1.0
 imagekitio>=4.2,<5.0
 supabase>=2.15,<3.0
-pydub
 imageio-ffmpeg
-audioop-lts; python_version >= "3.13"
