@@ -821,7 +821,7 @@ def chat(
             refusal = getattr(message, "refusal", None)
             transcript = getattr(audio, "transcript", None)
 
-            logging.info(
+            logging.warning(
                 "Emily audio response diagnostics: "
                 "model=%s choices=%s finish_reason=%s "
                 "content_present=%s content_length=%s "
