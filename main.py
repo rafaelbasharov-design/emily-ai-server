@@ -6,7 +6,9 @@ import urllib.request
 import urllib.error
 from typing import Literal
 import imageio_ffmpeg
+from pydub import AudioSegment
 
+AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 
 import firebase_admin
 from firebase_admin import auth, credentials, firestore
@@ -16,48 +18,17 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 def convert_audio_to_wav(audio_bytes: bytes) -> bytes:
-    """Convert uploaded M4A audio to WAV using the bundled FFmpeg."""
-    import subprocess
-    import tempfile
-    from pathlib import Path
+    """Convert uploaded audio to WAV for OpenAI audio input."""
+    import io
 
-    with tempfile.TemporaryDirectory(prefix="emily-audio-") as temp_dir:
-        source = Path(temp_dir) / "input.m4a"
-        target = Path(temp_dir) / "output.wav"
+    source = io.BytesIO(audio_bytes)
+    output = io.BytesIO()
 
-        source.write_bytes(audio_bytes)
+    audio = AudioSegment.from_file(source, format="m4a")
+    audio.export(output, format="wav")
 
-        command = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-hide_banner",
-            "-loglevel", "error",
-            "-y",
-            "-i", str(source),
-            "-f", "wav",
-            str(target),
-        ]
+    return output.getvalue()
 
-        try:
-            result = subprocess.run(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=120,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("FFmpeg audio conversion timed out.") from exc
-
-        if result.returncode != 0:
-            error = result.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(
-                f"FFmpeg audio conversion failed: {error or 'Unknown error'}"
-            )
-
-        if not target.is_file() or target.stat().st_size == 0:
-            raise RuntimeError("FFmpeg produced an empty WAV file.")
-
-        return target.read_bytes()
 
 app = FastAPI(title="Emily AI Server", version="0.3.0-memory-candidate")
 
@@ -815,12 +786,9 @@ def chat(
                             {
                                 "type": "text",
                                 "text": (
-                                    "Respond naturally to the meaning of the user's spoken message. "
+                                    "Respond naturally to the user's spoken message. "
                                     "Use the audio as the primary source of meaning. "
-                                    "Reply in the same language as the user. "
-                                    "Do not describe the speaker, voice, recording, or audio quality. "
-                                    "Return only a plain conversational response. "
-                                    "Never return JSON, metadata, field names, or analysis."
+                                    "Reply in the same language as the user."
                                 ),
                             },
                             {
@@ -833,35 +801,9 @@ def chat(
                         ],
                     })
                 else:
-                    history_content = item.content
-
-                    if item.role == "assistant":
-                        try:
-                            history_payload = json.loads(history_content)
-                        except (json.JSONDecodeError, TypeError):
-                            history_payload = None
-
-                        if isinstance(history_payload, dict):
-                            blocked_keys = {
-                                "audio_description",
-                                "audio_analysis_request",
-                                "analysis",
-                            }
-
-                            if any(key in history_payload for key in blocked_keys):
-                                continue
-
-                            for key in ("final", "response", "message", "text", "speech"):
-                                candidate = history_payload.get(key)
-                                if isinstance(candidate, str) and candidate.strip():
-                                    history_content = candidate.strip()
-                                    break
-                            else:
-                                continue
-
                     audio_messages.append({
                         "role": item.role,
-                        "content": history_content,
+                        "content": item.content,
                     })
 
             result = client.chat.completions.create(
@@ -908,45 +850,27 @@ def chat(
             )
             reply = result.output_text.strip()
 
-        # Normalize model output while preserving the original text-chat behavior.
+        # Normalize model output: extract user-facing text from JSON responses.
         reply = reply.strip()
 
-        if request.audio_base64:
-            try:
-                parsed_reply = json.loads(reply)
+        try:
+            parsed_reply = json.loads(reply)
 
-                if isinstance(parsed_reply, dict):
-                    message_text = None
+            if isinstance(parsed_reply, dict):
+                message_text = parsed_reply.get("response")
 
-                    for key in ("final", "response", "message", "text", "speech"):
-                        candidate = parsed_reply.get(key)
-                        if isinstance(candidate, str) and candidate.strip():
-                            message_text = candidate.strip()
-                            break
+                if not isinstance(message_text, str):
+                    message_text = parsed_reply.get("message")
 
-                    reply = message_text or ""
+                if not isinstance(message_text, str):
+                    message_text = parsed_reply.get("text")
 
-            except (json.JSONDecodeError, TypeError):
-                pass
-        else:
-            # Preserve the original text-message normalization.
-            try:
-                parsed_reply = json.loads(reply)
+                if isinstance(message_text, str):
+                    reply = message_text.strip()
 
-                if isinstance(parsed_reply, dict):
-                    message_text = parsed_reply.get("response")
+        except (json.JSONDecodeError, TypeError):
+            pass
 
-                    if not isinstance(message_text, str):
-                        message_text = parsed_reply.get("message")
-
-                    if not isinstance(message_text, str):
-                        message_text = parsed_reply.get("text")
-
-                    if isinstance(message_text, str):
-                        reply = message_text.strip()
-
-            except (json.JSONDecodeError, TypeError):
-                pass
         # Remove audio model separator artifacts.
         reply = reply.replace("<lim_sep>", "").strip()
 
