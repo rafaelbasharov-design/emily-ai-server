@@ -184,6 +184,110 @@ def upload_private_audio(
     }
 
 
+
+@router.post("/audio/assistant/upload")
+def upload_assistant_generated_audio(
+    message_id: str = Form(...),
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+):
+    uid = verified_uid(authorization)
+
+    if not message_id or len(message_id) > 150:
+        raise HTTPException(status_code=400, detail="Invalid message ID.")
+
+    if file.content_type not in {"audio/wav", "audio/x-wav"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported audio format. Expected WAV.",
+        )
+
+    audio = file.file.read(MAX_AUDIO_SIZE + 1)
+
+    if not audio:
+        raise HTTPException(status_code=400, detail="Empty audio file.")
+
+    if len(audio) > MAX_AUDIO_SIZE:
+        raise HTTPException(status_code=413, detail="Audio file too large.")
+
+    document = (
+        firestore.client()
+        .collection("users")
+        .document(uid)
+        .collection("messages")
+        .document(message_id)
+    )
+
+    snapshot = document.get()
+
+    if not snapshot.exists:
+        raise HTTPException(status_code=404, detail="Message not found.")
+
+    message = snapshot.to_dict() or {}
+
+    if message.get("role") != "assistant":
+        raise HTTPException(
+            status_code=403,
+            detail="Audio can only be attached to assistant messages.",
+        )
+
+    if message.get("audio_file_id") or message.get("audio_file_path"):
+        raise HTTPException(
+            status_code=409,
+            detail="Audio is already attached to this message.",
+        )
+
+    object_path = (
+        f"{AUDIO_PREFIX}/{uid}/"
+        f"{uuid.uuid4().hex}{AUDIO_EXTENSIONS[file.content_type]}"
+    )
+
+    storage = get_supabase().storage.from_(SUPABASE_BUCKET)
+
+    try:
+        storage.upload(
+            object_path,
+            audio,
+            {
+                "content-type": file.content_type,
+                "upsert": "false",
+            },
+        )
+    except Exception:
+        logging.exception("Supabase assistant audio upload failed")
+        raise HTTPException(status_code=502, detail="Audio upload failed.")
+
+    try:
+        document.update({
+            "audio_file_id": object_path,
+            "audio_file_path": object_path,
+            "audio_mime_type": file.content_type,
+            "audio_size": len(audio),
+            "audio_status": "uploaded",
+        })
+    except Exception:
+        logging.exception(
+            "Assistant audio uploaded but Firestore metadata save failed"
+        )
+
+        try:
+            storage.remove([object_path])
+        except Exception:
+            logging.exception(
+                "Could not remove assistant audio after metadata failure"
+            )
+
+        raise HTTPException(
+            status_code=502,
+            detail="Audio uploaded, but its metadata could not be saved.",
+        )
+
+    return {
+        "message_id": message_id,
+        "status": "uploaded",
+    }
+
+
 @router.post("/audio/url")
 def get_private_audio_url(
     message_id: str = Form(...),
