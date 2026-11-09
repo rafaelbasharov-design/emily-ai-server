@@ -902,6 +902,10 @@ def chat(
         reply = reply.replace("<lim_sep>", "").strip()
 
         if not reply:
+            if request.audio_base64:
+                logging.warning(
+                    "Audio chat response was empty after normalization."
+                )
             raise HTTPException(
                 status_code=502,
                 detail="The AI returned an empty response.",
