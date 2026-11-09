@@ -821,6 +821,7 @@ def chat(
             content = getattr(message, "content", None)
             refusal = getattr(message, "refusal", None)
             transcript = getattr(audio, "transcript", None)
+            audio_data = getattr(audio, "data", None)
 
             logging.warning(
                 "Emily audio response diagnostics: "
@@ -828,6 +829,7 @@ def chat(
                 "content_present=%s content_length=%s "
                 "refusal_present=%s audio_present=%s "
                 "transcript_present=%s transcript_length=%s "
+                "audio_data_present=%s audio_data_length=%s "
                 "prompt_tokens=%s completion_tokens=%s total_tokens=%s",
                 result.model,
                 len(result.choices),
@@ -838,6 +840,8 @@ def chat(
                 audio is not None,
                 bool(transcript),
                 len(transcript) if isinstance(transcript, str) else 0,
+                isinstance(audio_data, str) and bool(audio_data),
+                len(audio_data) if isinstance(audio_data, str) else 0,
                 result.usage.prompt_tokens if result.usage else None,
                 result.usage.completion_tokens if result.usage else None,
                 result.usage.total_tokens if result.usage else None,
