@@ -786,9 +786,11 @@ def chat(
                             {
                                 "type": "text",
                                 "text": (
-                                    "Respond naturally to the user's spoken message. "
+                                    "Respond naturally to the meaning of the user's spoken message. "
                                     "Use the audio as the primary source of meaning. "
-                                    "Reply in the same language as the user."
+                                    "Reply in the same language as the user. "
+                                    "Return only the final conversational response as plain text. "
+                                    "Do not include analysis, JSON, metadata, or field names."
                                 ),
                             },
                             {
@@ -850,26 +852,51 @@ def chat(
             )
             reply = result.output_text.strip()
 
-        # Normalize model output: extract user-facing text from JSON responses.
+        # Normalize audio and text responses separately.
         reply = reply.strip()
 
-        try:
-            parsed_reply = json.loads(reply)
+        if request.audio_base64:
+            try:
+                parsed_reply = json.loads(reply)
 
-            if isinstance(parsed_reply, dict):
-                message_text = parsed_reply.get("response")
+                if isinstance(parsed_reply, dict):
+                    message_text = None
 
-                if not isinstance(message_text, str):
-                    message_text = parsed_reply.get("message")
+                    for key in (
+                        "final_response",
+                        "response",
+                        "message",
+                        "text",
+                        "speech",
+                    ):
+                        candidate = parsed_reply.get(key)
+                        if isinstance(candidate, str) and candidate.strip():
+                            message_text = candidate.strip()
+                            break
 
-                if not isinstance(message_text, str):
-                    message_text = parsed_reply.get("text")
+                    reply = message_text or ""
 
-                if isinstance(message_text, str):
-                    reply = message_text.strip()
+            except (json.JSONDecodeError, TypeError):
+                pass
+        else:
+            # Preserve the established text-chat behavior.
+            try:
+                parsed_reply = json.loads(reply)
 
-        except (json.JSONDecodeError, TypeError):
-            pass
+                if isinstance(parsed_reply, dict):
+                    message_text = parsed_reply.get("response")
+
+                    if not isinstance(message_text, str):
+                        message_text = parsed_reply.get("message")
+
+                    if not isinstance(message_text, str):
+                        message_text = parsed_reply.get("text")
+
+                    if isinstance(message_text, str):
+                        reply = message_text.strip()
+
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         # Remove audio model separator artifacts.
         reply = reply.replace("<lim_sep>", "").strip()
