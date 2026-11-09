@@ -811,7 +811,8 @@ def chat(
             result = client.chat.completions.create(
                 model="gpt-audio-1.5",
                 messages=audio_messages,
-                modalities=["text"],
+                modalities=["text", "audio"],
+                audio={"voice": "alloy", "format": "wav"},
             )
             choice = result.choices[0] if result.choices else None
             message = choice.message if choice else None
@@ -841,9 +842,11 @@ def chat(
                 result.usage.completion_tokens if result.usage else None,
                 result.usage.total_tokens if result.usage else None,
             )
-            reply = (
-                result.choices[0].message.content or ""
-            ).strip()
+            reply = ""
+            if isinstance(content, str) and content.strip():
+                reply = content.strip()
+            elif isinstance(transcript, str) and transcript.strip():
+                reply = transcript.strip()
         else:
             result = client.responses.create(
                 model=model,
