@@ -129,6 +129,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     image_url: str | None = None
+    audio_base64: str | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -725,6 +726,7 @@ def chat(
         )
 
     uploaded_image_url = None
+    generated_audio_base64 = None
     if request.image_base64:
         uploaded_image_url = upload_imagekit_image(
             request.image_base64,
@@ -822,6 +824,11 @@ def chat(
             refusal = getattr(message, "refusal", None)
             transcript = getattr(audio, "transcript", None)
             audio_data = getattr(audio, "data", None)
+            generated_audio_base64 = (
+                audio_data
+                if isinstance(audio_data, str) and audio_data
+                else None
+            )
 
             logging.warning(
                 "Emily audio response diagnostics: "
@@ -930,7 +937,11 @@ def chat(
                 pending_messages=pending_messages,
             )
 
-        return ChatResponse(reply=reply, image_url=uploaded_image_url)
+        return ChatResponse(
+            reply=reply,
+            image_url=uploaded_image_url,
+            audio_base64=generated_audio_base64,
+        )
 
     except HTTPException:
         raise
