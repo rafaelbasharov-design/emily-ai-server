@@ -21,15 +21,38 @@ def convert_audio_to_wav(audio_bytes: bytes) -> bytes:
     """Convert uploaded audio to WAV for OpenAI audio input."""
     import io
 
+    logging.warning(
+        "Emily input audio diagnostics: size=%d signature=%s",
+        len(audio_bytes),
+        audio_bytes[:16].hex(),
+    )
+
     source = io.BytesIO(audio_bytes)
     output = io.BytesIO()
 
     audio = AudioSegment.from_file(source, format="m4a")
+
+    logging.warning(
+        "Emily decoded audio diagnostics: duration_ms=%d "
+        "frame_rate=%d channels=%d sample_width=%d",
+        len(audio),
+        audio.frame_rate,
+        audio.channels,
+        audio.sample_width,
+    )
+
     audio.export(output, format="wav")
+    wav_bytes = output.getvalue()
 
-    return output.getvalue()
+    logging.warning(
+        "Emily WAV output diagnostics: size=%d signature=%s "
+        "riff_wave_valid=%s",
+        len(wav_bytes),
+        wav_bytes[:16].hex(),
+        wav_bytes[:4] == b"RIFF" and wav_bytes[8:12] == b"WAVE",
+    )
 
-
+    return wav_bytes
 app = FastAPI(title="Emily AI Server", version="0.3.0-memory-candidate")
 
 app.add_middleware(
