@@ -4,11 +4,11 @@ import base64
 import logging
 import urllib.request
 import urllib.error
+import subprocess
+import tempfile
 from typing import Literal
 import imageio_ffmpeg
-from pydub import AudioSegment
 
-AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 
 import firebase_admin
 from firebase_admin import auth, credentials, firestore
@@ -18,8 +18,8 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 def convert_audio_to_wav(audio_bytes: bytes) -> bytes:
-    """Convert uploaded audio to WAV for OpenAI audio input."""
-    import io
+    """Convert uploaded M4A audio to a valid WAV using FFmpeg."""
+    import wave
 
     logging.warning(
         "Emily input audio diagnostics: size=%d signature=%s",
@@ -27,32 +27,77 @@ def convert_audio_to_wav(audio_bytes: bytes) -> bytes:
         audio_bytes[:16].hex(),
     )
 
-    source = io.BytesIO(audio_bytes)
-    output = io.BytesIO()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        input_path = os.path.join(temp_dir, "input.m4a")
+        output_path = os.path.join(temp_dir, "output.wav")
 
-    audio = AudioSegment.from_file(source, format="m4a")
+        with open(input_path, "wb") as source:
+            source.write(audio_bytes)
+
+        command = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            input_path,
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "24000",
+            "-ac",
+            "1",
+            output_path,
+        ]
+
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            logging.error(
+                "Emily FFmpeg conversion failed: %s",
+                result.stderr[-2000:],
+            )
+            raise RuntimeError("Unable to convert uploaded audio to WAV.")
+
+        with open(output_path, "rb") as converted:
+            wav_bytes = converted.read()
+
+    if (
+        len(wav_bytes) <= 44
+        or wav_bytes[:4] != b"RIFF"
+        or wav_bytes[8:12] != b"WAVE"
+    ):
+        raise ValueError("FFmpeg produced an invalid or empty WAV file.")
+
+    with wave.open(__import__("io").BytesIO(wav_bytes), "rb") as wav:
+        duration_ms = round(
+            wav.getnframes() / wav.getframerate() * 1000
+        )
+        frame_rate = wav.getframerate()
+        channels = wav.getnchannels()
+        sample_width = wav.getsampwidth()
 
     logging.warning(
-        "Emily decoded audio diagnostics: duration_ms=%d "
-        "frame_rate=%d channels=%d sample_width=%d",
-        len(audio),
-        audio.frame_rate,
-        audio.channels,
-        audio.sample_width,
-    )
-
-    audio.export(output, format="wav")
-    wav_bytes = output.getvalue()
-
-    logging.warning(
-        "Emily WAV output diagnostics: size=%d signature=%s "
-        "riff_wave_valid=%s",
+        "Emily WAV output diagnostics: size=%d duration_ms=%d "
+        "frame_rate=%d channels=%d sample_width=%d signature=%s",
         len(wav_bytes),
+        duration_ms,
+        frame_rate,
+        channels,
+        sample_width,
         wav_bytes[:16].hex(),
-        wav_bytes[:4] == b"RIFF" and wav_bytes[8:12] == b"WAVE",
     )
 
     return wav_bytes
+
+
 app = FastAPI(title="Emily AI Server", version="0.3.0-memory-candidate")
 
 app.add_middleware(
